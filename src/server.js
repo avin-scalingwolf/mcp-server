@@ -4,7 +4,20 @@ const morgan = require('morgan');
 const db = require('./db');
 const { isSafeQuery } = require('./security');
 
+function auth(req, res, next) {
+  const key = req.headers["x-api-key"];
+
+  if (!key || key !== process.env.MCP_API_KEY) {
+    return res.status(401).json({
+      error: "Unauthorized"
+    });
+  }
+
+  next();
+}
+
 const app = express();
+app.use(auth);
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
