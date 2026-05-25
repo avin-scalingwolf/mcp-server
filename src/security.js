@@ -1,4 +1,4 @@
-function isSafeQuery(queryString) {
+export function isSafeQuery(queryString) {
   if (process.env.ALLOW_WRITE === 'true') {
     return true;
   }
@@ -31,6 +31,4 @@ function isSafeQuery(queryString) {
   return true;
 }
 
-module.exports = {
-  isSafeQuery
-};
+// exported inline above

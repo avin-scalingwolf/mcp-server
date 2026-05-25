@@ -1,73 +1,114 @@
-require('dotenv').config();
-const express = require('express');
-const morgan = require('morgan');
-const db = require('./db');
-const { isSafeQuery } = require('./security');
-
-function auth(req, res, next) {
-  const key = req.headers["x-api-key"];
-
-  if (!key || key !== process.env.MCP_API_KEY) {
-    return res.status(401).json({
-      error: "Unauthorized"
-    });
-  }
-
-  next();
-}
+import 'dotenv/config';
+import express from 'express';
+import morgan from 'morgan';
+import { z } from 'zod';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import db from './db.js';
+import { isSafeQuery } from './security.js';
 
 const app = express();
-app.use(auth);
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
 // Log all queries (HTTP requests)
 app.use(morgan('combined'));
+app.use(express.json());
 
-// GET /health -> returns status ok
+// Legacy health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// GET /tables -> lists all tables from information_schema
-app.get('/tables', async (req, res) => {
-  try {
-    const result = await db.query(`
-      SELECT table_schema, table_name 
-      FROM information_schema.tables 
-      WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
-    `);
-    res.json({ tables: result.rows });
-  } catch (err) {
-    console.error('Error fetching tables', err);
-    res.status(500).json({ error: 'Internal server error' });
+// Authentication middleware
+function auth(req, res, next) {
+  const key = req.headers["x-api-key"];
+  if (!key || key !== process.env.MCP_API_KEY) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+}
+
+// Initialize MCP Server
+const mcp = new McpServer({
+  name: "supabase-mcp",
+  version: "1.0.0"
+});
+
+// Register Tool: list_tables
+mcp.tool("list_tables",
+  "List all available tables in the database",
+  {},
+  async () => {
+    try {
+      const result = await db.query(`
+        SELECT table_schema, table_name 
+        FROM information_schema.tables 
+        WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+      `);
+      return {
+        content: [{ type: "text", text: JSON.stringify({ tables: result.rows }, null, 2) }]
+      };
+    } catch (err) {
+      console.error('Error fetching tables', err);
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Error fetching tables: ${err.message}` }]
+      };
+    }
+  }
+);
+
+// Register Tool: query_database
+mcp.tool("query_database",
+  "Execute a safe SELECT query against the database",
+  { 
+    query: z.string().describe("The SQL query to execute")
+  },
+  async ({ query }) => {
+    console.log('Received query via MCP:', query);
+    
+    if (!isSafeQuery(query)) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: 'Query not allowed. Only SELECT queries are permitted.' }]
+      };
+    }
+
+    try {
+      const result = await db.query(query, []);
+      return {
+        content: [{ type: "text", text: JSON.stringify({ rows: result.rows, rowCount: result.rowCount }, null, 2) }]
+      };
+    } catch (err) {
+      console.error('Error executing query', err);
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Error executing query: ${err.message}` }]
+      };
+    }
+  }
+);
+
+// MCP endpoints over SSE
+let transport;
+
+app.get("/sse", auth, async (req, res) => {
+  console.log("New SSE connection established");
+  transport = new SSEServerTransport("/message", res);
+  await mcp.server.connect(transport);
+});
+
+app.post("/message", auth, async (req, res) => {
+  if (transport) {
+    await transport.handlePostMessage(req, res);
+  } else {
+    res.status(400).send("No active SSE connection");
   }
 });
 
-// POST /query -> executes safe SELECT queries only
-app.post('/query', async (req, res) => {
-  const { query, params = [] } = req.body;
-
-  if (!query) {
-    return res.status(400).json({ error: 'Query is required' });
-  }
-
-  console.log('Received query:', query);
-
-  if (!isSafeQuery(query)) {
-    return res.status(403).json({ error: 'Query not allowed. Only SELECT queries are permitted.' });
-  }
-
-  try {
-    const result = await db.query(query, params);
-    res.json({ rows: result.rows, rowCount: result.rowCount });
-  } catch (err) {
-    console.error('Error executing query', err);
-    res.status(400).json({ error: err.message });
-  }
-});
-
+// Start the server
 app.listen(PORT, () => {
-  console.log(`MCP Gateway server running on port ${PORT}`);
+  console.log(`MCP Server running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`MCP SSE endpoint: http://localhost:${PORT}/sse`);
 });
