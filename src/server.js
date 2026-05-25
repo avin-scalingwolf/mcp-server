@@ -20,7 +20,7 @@ app.get('/health', (req, res) => {
 
 // Authentication middleware
 function auth(req, res, next) {
-  const key = req.headers["x-api-key"];
+  const key = req.headers["x-api-key"] || req.query.key;
   if (!key || key !== process.env.MCP_API_KEY) {
     return res.status(401).json({ error: "Unauthorized" });
   }
