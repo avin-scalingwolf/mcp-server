@@ -29,8 +29,10 @@ function timingSafeEqualStr(a, b) {
   return crypto.timingSafeEqual(ab, bb);
 }
 
+// Accept the API key from either the `x-api-key` header or the `?key=` query
+// parameter — some IDE clients can't attach custom headers to the SSE GET.
 function auth(req, res, next) {
-  const key = req.headers['x-api-key'];
+  const key = req.headers['x-api-key'] || req.query.key;
   const expected = process.env.MCP_API_KEY;
   if (!expected || !key || !timingSafeEqualStr(key, expected)) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -64,7 +66,10 @@ app.get('/sse', auth, async (req, res) => {
   await mcp.server.connect(transport);
 });
 
-app.post('/message', auth, async (req, res) => {
+// No auth middleware on /message: some IDE clients can't add headers to the
+// SSE POST channel, and the sessionId (an unguessable UUID established on the
+// authenticated /sse GET) is itself the session capability token.
+app.post('/message', async (req, res) => {
   const sessionId = req.query.sessionId;
   const transport = sseTransports.get(sessionId);
   if (!transport) {
