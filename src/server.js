@@ -40,16 +40,19 @@ function auth(req, res, next) {
   next();
 }
 
-// One McpServer instance; tools are registered once and shared by every transport.
-const mcp = new McpServer({
-  name: 'scalingwolf-mcp',
-  version: '2.1.0',
-});
+function createMcpServer() {
+  const mcp = new McpServer({
+    name: 'scalingwolf-mcp',
+    version: '2.1.0',
+  });
 
-registerInspect(mcp, db);
-registerQuery(mcp, db);
-registerMutate(mcp, db, pool);
-registerMigrate(mcp, db);
+  registerInspect(mcp, db);
+  registerQuery(mcp, db);
+  registerMutate(mcp, db, pool);
+  registerMigrate(mcp, db);
+
+  return mcp;
+}
 
 // --- SSE transport (legacy, for older clients) ---
 // One transport per SSE session; without this map a second client kicks the first off.
@@ -63,7 +66,12 @@ app.get('/sse', auth, async (req, res) => {
     sseTransports.delete(transport.sessionId);
     if (LOG_QUERIES) console.log(`[sse] disconnected sessionId=${transport.sessionId}`);
   });
-  await mcp.server.connect(transport);
+  try {
+    const mcp = createMcpServer();
+    await mcp.server.connect(transport);
+  } catch (err) {
+    console.error('[sse] connect error:', err);
+  }
 });
 
 // No auth middleware on /message: some IDE clients can't add headers to the
@@ -103,6 +111,7 @@ app.all('/mcp', auth, express.json(), async (req, res) => {
           if (LOG_QUERIES) console.log(`[http] disconnected sessionId=${transport.sessionId}`);
         }
       };
+      const mcp = createMcpServer();
       await mcp.server.connect(transport);
     } else {
       return res.status(400).json({
@@ -133,8 +142,23 @@ app.listen(PORT, async () => {
 
   try {
     const res = await db.query("SELECT count(*) FROM core.users", []);
+    
+    // Calculate total active schemas (excluding supabase internals)
+    const HIDDEN_SCHEMAS = [
+      'information_schema', 'pg_catalog', 'pg_toast', 'auth', 'realtime', 'storage', 'vault',
+      'extensions', 'graphql', 'graphql_public', 'supabase_functions', 'supabase_migrations',
+      'net', 'pgsodium', 'pgsodium_masks', 'cron'
+    ];
+    const schemaRes = await db.query(`
+      SELECT count(*) FROM pg_namespace n
+      WHERE n.nspname NOT LIKE 'pg_%'
+        AND n.nspname <> 'information_schema'
+        AND n.nspname NOT IN (${HIDDEN_SCHEMAS.map(s => `'${s}'`).join(',')})
+    `);
+
     console.log("===== STARTUP DIAGNOSTICS =====");
     console.log(`Total users in core.users: ${res.rows[0].count}`);
+    console.log(`Total active schemas: ${schemaRes.rows[0].count}`);
     console.log("===============================");
   } catch (e) {
     console.error("Error querying users on startup:", e.message);
