@@ -107,7 +107,7 @@ app.get("/sse", auth, async (req, res) => {
   });
 });
 
-app.post("/message", auth, async (req, res) => {
+app.post("/message", async (req, res) => {
   const sessionId = req.query.sessionId;
   const session = sessions.get(sessionId);
   if (session) {
