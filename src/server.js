@@ -119,7 +119,37 @@ app.post('/message', async (req, res) => {
 // JSON body parser is scoped to /mcp so it doesn't interfere with the SSE /message stream.
 const httpTransports = new Map();
 
-app.all('/mcp', auth, express.json(), async (req, res) => {
+// The MCP SDK's StreamableHTTPServerTransport requires the client to send
+// `Accept: application/json, text/event-stream` exactly — otherwise it
+// returns 406 Not Acceptable. Several real clients (Antigravity, ad-hoc
+// agents, browser fetch) send `Accept: */*` or omit Accept entirely. Since
+// this is an internal tool we'd rather succeed than be strict, so we
+// synthesize the dual-Accept header when the client's Accept doesn't already
+// satisfy the SDK.
+//
+// The Node wrapper inside the SDK pulls headers from `req.rawHeaders`, not
+// `req.headers`, so we must mutate the raw array to take effect.
+const RELAXED_ACCEPT = 'application/json, text/event-stream';
+function relaxAcceptHeader(req, _res, next) {
+  const current = String(req.headers.accept || '').toLowerCase();
+  const ok = current.includes('application/json') && current.includes('text/event-stream');
+  if (ok) return next();
+
+  req.headers.accept = RELAXED_ACCEPT;
+  const raw = req.rawHeaders || [];
+  let found = false;
+  for (let i = 0; i < raw.length; i += 2) {
+    if (raw[i].toLowerCase() === 'accept') {
+      raw[i + 1] = RELAXED_ACCEPT;
+      found = true;
+      break;
+    }
+  }
+  if (!found) raw.push('Accept', RELAXED_ACCEPT);
+  next();
+}
+
+app.all('/mcp', auth, relaxAcceptHeader, express.json(), async (req, res) => {
   try {
     const sessionId = req.headers['mcp-session-id'];
     let transport;
