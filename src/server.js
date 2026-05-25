@@ -58,7 +58,36 @@ function createMcpServer() {
 // One transport per SSE session; without this map a second client kicks the first off.
 const sseTransports = new Map();
 
+// The MCP SDK's SSEServerTransport always emits a relative URL in the
+// `endpoint` event (it strips host/scheme — see node_modules/.../sse.js). Some
+// MCP clients (Antigravity, older Inspector, certain SDK ports) feed that
+// string into `new URL(data)` without a base and crash, surfacing as
+// "session not found (session ID: )". To stay compatible without forking the
+// SDK, we rewrite the first endpoint event on the wire to use an absolute URL.
+function absoluteBaseUrl(req) {
+  if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL.replace(/\/+$/, '');
+  const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
+  const host = req.headers['x-forwarded-host'] || req.get('host');
+  return `${proto}://${host}`;
+}
+
+function rewriteEndpointEventToAbsolute(res, baseUrl) {
+  const originalWrite = res.write.bind(res);
+  let rewritten = false;
+  res.write = function patchedWrite(chunk, ...rest) {
+    if (!rewritten && typeof chunk === 'string' && chunk.startsWith('event: endpoint\ndata: /')) {
+      rewritten = true;
+      chunk = chunk.replace(
+        /^event: endpoint\ndata: (\/[^\n]*)/,
+        (_, path) => `event: endpoint\ndata: ${baseUrl}${path}`,
+      );
+    }
+    return originalWrite(chunk, ...rest);
+  };
+}
+
 app.get('/sse', auth, async (req, res) => {
+  rewriteEndpointEventToAbsolute(res, absoluteBaseUrl(req));
   const transport = new SSEServerTransport('/message', res);
   sseTransports.set(transport.sessionId, transport);
   if (LOG_QUERIES) console.log(`[sse] connected sessionId=${transport.sessionId}`);
