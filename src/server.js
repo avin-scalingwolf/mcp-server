@@ -28,10 +28,11 @@ function auth(req, res, next) {
 }
 
 // Initialize MCP Server
-const mcp = new McpServer({
-  name: "supabase-mcp",
-  version: "1.0.0"
-});
+function createMcpServer() {
+  const mcp = new McpServer({
+    name: "supabase-mcp",
+    version: "1.0.0"
+  });
 
 // Register Tool: list_tables
 mcp.tool("list_tables",
@@ -88,20 +89,31 @@ mcp.tool("query_database",
   }
 );
 
+  return mcp;
+}
+
 // MCP endpoints over SSE
-let transport;
+const sessions = new Map();
 
 app.get("/sse", auth, async (req, res) => {
   console.log("New SSE connection established");
-  transport = new SSEServerTransport("/message", res);
+  const transport = new SSEServerTransport("/message", res);
+  const mcp = createMcpServer();
+  sessions.set(transport.sessionId, { transport, mcp });
   await mcp.server.connect(transport);
+  
+  res.on('close', () => {
+    sessions.delete(transport.sessionId);
+  });
 });
 
 app.post("/message", auth, async (req, res) => {
-  if (transport) {
-    await transport.handlePostMessage(req, res);
+  const sessionId = req.query.sessionId;
+  const session = sessions.get(sessionId);
+  if (session) {
+    await session.transport.handlePostMessage(req, res);
   } else {
-    res.status(400).send("No active SSE connection");
+    res.status(400).send("No active SSE connection for this session");
   }
 });
 
