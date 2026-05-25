@@ -125,9 +125,18 @@ app.all('/mcp', auth, express.json(), async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`MCP Server v2.1.0 listening on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`SSE endpoint (legacy):      GET  /sse  + POST /message`);
   console.log(`Streamable HTTP endpoint:   ALL  /mcp`);
+
+  try {
+    const res = await db.query("SELECT count(*) FROM core.users", []);
+    console.log("===== STARTUP DIAGNOSTICS =====");
+    console.log(`Total users in core.users: ${res.rows[0].count}`);
+    console.log("===============================");
+  } catch (e) {
+    console.error("Error querying users on startup:", e.message);
+  }
 });
