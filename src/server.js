@@ -12,7 +12,6 @@ const PORT = process.env.PORT || 3000;
 
 // Log all queries (HTTP requests)
 app.use(morgan('combined'));
-app.use(express.json());
 
 // Legacy health check
 app.get('/health', (req, res) => {
