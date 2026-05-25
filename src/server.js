@@ -1,113 +1,72 @@
 import 'dotenv/config';
 import express from 'express';
 import morgan from 'morgan';
-import { z } from 'zod';
+import crypto from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import db from './db.js';
-import { isSafeQuery } from './security.js';
+import { register as registerInspect } from './tools/inspect.js';
+import { register as registerQuery } from './tools/query.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const LOG_QUERIES = process.env.LOG_QUERIES === 'true';
 
-// Log all queries (HTTP requests)
 app.use(morgan('combined'));
 
-// Legacy health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// Authentication middleware
+function timingSafeEqualStr(a, b) {
+  const ab = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  if (ab.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ab, bb);
+}
+
 function auth(req, res, next) {
-  const key = req.headers["x-api-key"];
-  if (!key || key !== process.env.MCP_API_KEY) {
-    return res.status(401).json({ error: "Unauthorized" });
+  const key = req.headers['x-api-key'];
+  const expected = process.env.MCP_API_KEY;
+  if (!expected || !key || !timingSafeEqualStr(key, expected)) {
+    return res.status(401).json({ error: 'Unauthorized' });
   }
   next();
 }
 
-// Initialize MCP Server
 const mcp = new McpServer({
-  name: "supabase-mcp",
-  version: "1.0.0"
+  name: 'scalingwolf-mcp',
+  version: '2.0.0',
 });
 
-// Register Tool: list_tables
-mcp.tool("list_tables",
-  "List all available tables in the database",
-  {},
-  async () => {
-    try {
-      const result = await db.query(`
-        SELECT table_schema, table_name 
-        FROM information_schema.tables 
-        WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
-      `);
-      return {
-        content: [{ type: "text", text: JSON.stringify({ tables: result.rows }, null, 2) }]
-      };
-    } catch (err) {
-      console.error('Error fetching tables', err);
-      return {
-        isError: true,
-        content: [{ type: "text", text: `Error fetching tables: ${err.message}` }]
-      };
-    }
-  }
-);
+registerInspect(mcp, db);
+registerQuery(mcp, db);
 
-// Register Tool: query_database
-mcp.tool("query_database",
-  "Execute a safe SELECT query against the database",
-  { 
-    query: z.string().describe("The SQL query to execute")
-  },
-  async ({ query }) => {
-    console.log('Received query via MCP:', query);
-    
-    if (!isSafeQuery(query)) {
-      return {
-        isError: true,
-        content: [{ type: "text", text: 'Query not allowed. Only SELECT queries are permitted.' }]
-      };
-    }
+// One transport per SSE session. Without this, a second client kicks the first off.
+const transports = new Map();
 
-    try {
-      const result = await db.query(query, []);
-      return {
-        content: [{ type: "text", text: JSON.stringify({ rows: result.rows, rowCount: result.rowCount }, null, 2) }]
-      };
-    } catch (err) {
-      console.error('Error executing query', err);
-      return {
-        isError: true,
-        content: [{ type: "text", text: `Error executing query: ${err.message}` }]
-      };
-    }
-  }
-);
-
-// MCP endpoints over SSE
-let transport;
-
-app.get("/sse", auth, async (req, res) => {
-  console.log("New SSE connection established");
-  transport = new SSEServerTransport("/message", res);
+app.get('/sse', auth, async (req, res) => {
+  const transport = new SSEServerTransport('/message', res);
+  transports.set(transport.sessionId, transport);
+  if (LOG_QUERIES) console.log(`[sse] connected sessionId=${transport.sessionId}`);
+  res.on('close', () => {
+    transports.delete(transport.sessionId);
+    if (LOG_QUERIES) console.log(`[sse] disconnected sessionId=${transport.sessionId}`);
+  });
   await mcp.server.connect(transport);
 });
 
-app.post("/message", auth, async (req, res) => {
-  if (transport) {
-    await transport.handlePostMessage(req, res);
-  } else {
-    res.status(400).send("No active SSE connection");
+app.post('/message', auth, async (req, res) => {
+  const sessionId = req.query.sessionId;
+  const transport = transports.get(sessionId);
+  if (!transport) {
+    return res.status(400).send(`No active SSE transport for sessionId=${sessionId}`);
   }
+  await transport.handlePostMessage(req, res);
 });
 
-// Start the server
 app.listen(PORT, () => {
-  console.log(`MCP Server running on port ${PORT}`);
+  console.log(`MCP Server v2.0.0 listening on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`MCP SSE endpoint: http://localhost:${PORT}/sse`);
+  console.log(`SSE endpoint: http://localhost:${PORT}/sse`);
 });
